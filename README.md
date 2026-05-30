@@ -4,6 +4,8 @@
 
 In active development since **April 2025**. Change log below reflects tracked commits from April 2026 onward.
 
+![Dashboard — revealed play cards](images/indexHTML_TTplaysSHOWN.png)
+
 ---
 
 ## Table of Contents
@@ -32,8 +34,9 @@ The final outputs are a formatted Excel workbook, a live web dashboard where pla
 ## Pipeline Architecture
 
 ```mermaid
-flowchart LR
-    A([pipeline_runner.py]) --> B
+flowchart TD
+    A([pipeline_runner.py])
+    A --> B
 
     subgraph Stage1["Stage 1 — Schedule"]
         B[BetsAPI\npaginated REST]
@@ -44,7 +47,7 @@ flowchart LR
     end
 
     subgraph Stage3["Stage 3 — Odds"]
-        D[OddsPapi\nHard Rock Bet\nsame-day + historical fallback]
+        D[OddsPapi · Hard Rock Bet\nsame-day + historical fallback]
     end
 
     subgraph Stage4["Stage 4 — Build"]
@@ -57,9 +60,9 @@ flowchart LR
 
     B --> C --> D --> E --> F
 
-    G[(master_h2h.csv\n~86 MB)] --> E
+    G[(master_h2h.csv ~86 MB)] --> E
     H[aliases.auto.csv] --> E
-    I[prop_thresholds.txt\nruntime config] --> E
+    I[prop_thresholds.txt] --> E
 ```
 
 ---
@@ -71,7 +74,7 @@ flowchart LR
 - **Dual-source odds pipeline** — OddsPapi (Hard Rock Bet) is the preferred odds source; BetsAPI fills any gaps. Opening lines older than 30 days are automatically excluded to prevent stale data from influencing signals.
 - **Automated odds orientation correction** — Both APIs assign players to a fixture independently, without exposing names inside the odds objects. The pipeline cross-references assigned lines against historical win rates and automatically flips reversed assignments.
 - **Concurrent history fetching** — `ThreadPoolExecutor` parallelizes per-player API calls; a local JSON cache prevents redundant network requests on reruns.
-- **Player name normalization** — Player names vary across data sources. A fuzzy-match alias system maps name variants to canonical identities in the master database, with a review tool (`suggest_aliases.py`) that surfaces unresolved conflicts.
+- **Player name normalization** — Player names vary across data sources. A fuzzy-match alias system maps name variants to canonical identities in the master database, with a review tool that surfaces unresolved conflicts.
 - **Deduplication by signature** — Every match record carries a stable `sig` key (`date|league|A|B|sets|scores_canonical`) used consistently across ingestion, backfill, and workbook build stages to prevent duplicates regardless of source.
 
 ### Analytics & Workbook Build
@@ -91,18 +94,33 @@ flowchart LR
 ### Results & Grading
 
 - **`grade_sheet_results.py`** — After a match day completes, looks up actual outcomes in the master database and writes WIN/LOSS/PUSH/NO MATCH results back into each row of the workbook. Generates filterable SUMMARY tables broken down by signal tier and by individual bet type, making it easy to analyze performance any way you want.
+
+![Graded sheet — SUMMARY and SUMMARY PER PROP tables](images/gradedsheetresultssummary.png)
+
 - **`combine_sheets.py`** — Smart-merges two daily workbooks: deduplicates by player pair and match time, keeps the newer version of conflicting rows, and re-sorts by start time. Handles the common case where early-morning matches appear in one run but not the other.
+- **`backfill_master_from_sheet.py`** — When match results weren't captured in real time, this script retroactively fetches the completed scores from BetsAPI and merges them into the master database using the same deduplication logic as the live pipeline.
 - **`batch_process_days.py`** — Chains combine → backfill → grade for a range of dates in a single command. Skips already-completed steps; `--force` re-runs everything.
-- **`make_subscriber_workbook.py`** — Produces a cleaned export for subscribers: strips internal long-window stat details, removes certain internal-only rows, and optionally exports to PDF.
+- **`make_subscriber_workbook.py`** — Produces a cleaned export for external subscribers: strips long-window stat details and internal-only rows that would make the underlying grading methodology transparent, and optionally exports to PDF.
 
 ### Dashboard
 
-- **`dashboard/index.html`** — Today's play cards. Each card is hidden behind a JS countdown and reveals itself 5 minutes before match time — uses the same signal selection rules as the Discord poster (GREEN and PURPLE highlights only, with a manually flagged time cell).
-- **`dashboard/results.html`** — Rolling win/loss/push record across all time, plus a day-by-day breakdown pulled from every graded workbook in the archive.
+Each day's plays are displayed as cards that are hidden until 5 minutes before the scheduled match time, then automatically revealed.
+
+| Before reveal | After reveal |
+|:---:|:---:|
+| ![Card hidden — countdown active](images/indexHTML_TTplaysHIDDEN.png) | ![Cards revealed — full play details](images/indexHTML_TTplaysSHOWN.png) |
+
+The results page tracks cumulative W/L/P record across all graded days, with filterable tier and prop-type breakdowns.
+
+| Results overview | Prop-type filter |
+|:---:|:---:|
+| ![Results page — tier breakdown and day history](images/results_html.png) | ![Results dropdown — filter by prop type](images/results_dropdown.png) |
 
 ### Discord Integration
 
-- **`discord_poster.py`** — Posts the day's highest-confidence plays to Discord via webhook. Only GREEN and PURPLE signals with a manually flagged match time are posted. Plays from the same match are grouped into a single message by default. A local `sent.json` file prevents double-posts on reruns. Handles Discord 429 rate-limit responses automatically with retry backoff.
+- **`discord_poster.py`** — Runs automatically throughout the day, posting each play to Discord approximately 5 minutes before its scheduled match time. Only GREEN and PURPLE signals with a manually flagged match time are posted, so the channel stays clean and actionable. Plays from the same match are grouped into a single message. A local `sent.json` file prevents double-posts on reruns, and Discord 429 rate-limit responses are handled automatically with retry backoff.
+
+![Discord — automated play posts with league branding](images/discrodplayPOST.png)
 
 ### Backtesting
 
@@ -159,13 +177,45 @@ total_sets | total_pts_A | total_pts_B | source | ingested_at | sig
 
 ## Sample Output
 
-Each daily workbook contains:
+Each daily workbook contains one row per signal per matchup. The table below shows a representative sample of key columns from a graded sheet:
 
-- **Schedule sheet** — One row per signal per matchup. Columns include player names with opening odds (source-flagged), the stat window, supporting data, historical win rate, color-tier highlight, and a PROP FORM column showing the last 5 real outcomes.
-- **H2H Data sheet** — Full rolling-window stat tables for every scheduled pair.
-- **Moneyline Trends tab** — Streak analysis with decimal and US odds.
+| League | Time (ET) | Matchup | Signal | Data | Result |
+|--------|-----------|---------|--------|------|--------|
+| TT Elite | 1:25 AM | Wisniewski vs Petas | S1 -2.5 | Petas L10=7 (159d) \| L15=12 (321d) \| L20=16 (427d) | WIN |
+| TT Elite | 1:25 AM | Wisniewski vs Petas | S3 UP 2-0 | Petas 10-0 L10 (412d) \| 15-1 L20 (494d) | PUSH |
+| Czech Liga | 2:00 AM | Levicky (-140 ✓) vs Oborny (+100 ✓) | O74.5 | L10=6 (61d) \| L15=11 (73d) \| L20=15 (84d) | WIN |
+| Czech Liga | 2:00 AM | Levicky (-140 ✓) vs Oborny (+100 ✓) | SPLIT | Levicky 8-2 L10 (92d) \| 15-5 L20 \|\| Oborny 8-2 L10 (82d) \| 14-6 L20 | WIN |
+| TT Cup | 2:10 AM | Krupnik (-105) vs Benes (-143) | S5 WIN | Benes 9-1 L10 (102d) \| 11-2 L20 (163d) | WIN |
 
-After a match day completes, graded workbooks add WIN/LOSS/PUSH result columns and filterable SUMMARY tables at the bottom of the Schedule sheet.
+The `✓` marker on odds indicates the line came from Hard Rock Bet (OddsPapi); unmarked lines are from BetsAPI. Window age in parentheses (e.g. `159d`) shows the calendar span of that rolling window.
+
+<details>
+<summary>Full row example — all columns for one matchup</summary>
+
+Each row in the workbook carries the following columns. This is one complete signal row:
+
+```
+League         TT Elite
+Time (ET)      1:25 AM
+Player 1       Karol Wisniewski
+Player 2       Kacper Petas
+Signal         S1 -2.5
+Data           Petas L10=7 (159d) | L15=12 (321d) | L20=16 (427d) | L25=19 (480d) | L30=20 (494d)
+Record         15 - 8 - 2
+Matches        26/4
+Last Meeting   2026-04-15
+Spreads (L10)  Petas -9/-10/-16/-12/-17/-14/-16/+3/-10/-15
+               Wisniewski +9/+10/+16/+12/+17/+14/+16/-3/+10/+15
+Set Totals     101, 58, 50, 54, 73, 52, 74, 105, 74, 51
+Prop Form      (last 5 applicable outcomes)
+Result         WIN
+Match Detail   2026-05-18 | 11-7; 8-11; 10-12; 11-13 | total=83
+Note           Petas(A) m+4
+```
+
+</details>
+
+After a match day completes, graded workbooks add the Result, Match Detail, and Note columns, plus SUMMARY and SUMMARY PER PROP tables at the bottom of the sheet — filterable by tier and prop type directly in Excel.
 
 ---
 
